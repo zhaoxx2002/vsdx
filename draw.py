@@ -2,6 +2,8 @@ import json
 import matplotlib.pyplot as plt
 import matplotlib.patches as patches
 import numpy as np
+import pytorch
+
 
 def load_vsdx_data(json_file):
     """加载VSDX结构数据"""
