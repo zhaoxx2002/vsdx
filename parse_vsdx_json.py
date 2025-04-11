@@ -118,46 +118,95 @@ def extract_shape_properties(shape_elem):
     return properties
 
 # ========== 提取 Shape 坐标（含 Master fallback） ==========
-def get_shape_geometry(shape_elem, zf):
+# 修改extract_shape_geometry函数以提取更多几何信息
+def extract_shape_geometry(shape_elem, zf):
     sid = shape_elem.get('ID')
     
-    # 从 Cell 元素获取几何信息
+    # 从Cell元素获取几何信息
     cells = {}
     for cell in shape_elem.findall('.//v:Cell', namespaces):
         name = cell.get('N')
-        if name in ['PinX', 'PinY', 'Width', 'Height']:
+        # 扩展提取的几何属性
+        if name in ['PinX', 'PinY', 'Width', 'Height', 'Angle', 'FlipX', 'FlipY', 'ResizeMode']:
             cells[name] = cell.get('V', '?')
     
-    if 'PinX' in cells and 'PinY' in cells:
-        return {
-            "x": cells.get('PinX', '?'),
-            "y": cells.get('PinY', '?'),
-            "width": cells.get('Width', '?'),
-            "height": cells.get('Height', '?')
-        }
-
-    # fallback 到 master 形状坐标
-    master_id = shape_elem.get("Master")
-    if master_id:
-        print(f"[DEBUG] 形状 ID:{sid} 尝试从 Master:{master_id} 获取几何信息")
-        return load_master_geometry(zf, master_id)
+    # 提取几何路径数据
+    geometry_sections = []
+    for section in shape_elem.findall('.//v:Section', namespaces):
+        if section.get('N', '').startswith('Geometry'):
+            geo_rows = []
+            for row in section.findall('.//v:Row', namespaces):
+                row_type = row.get('T', '')
+                row_data = {'type': row_type}
+                
+                for cell in row.findall('.//v:Cell', namespaces):
+                    cell_name = cell.get('N', '')
+                    cell_value = cell.get('V', '?')
+                    row_data[cell_name] = cell_value
+                
+                geo_rows.append(row_data)
+            
+            if geo_rows:
+                geometry_sections.append(geo_rows)
     
-    print(f"[DEBUG] 警告: 形状 ID:{sid} 没有找到几何信息")
-    return {"x": "?", "y": "?", "width": "?", "height": "?"}
+    # 构建完整的几何信息
+    geometry = {
+        "x": cells.get('PinX', '?'),
+        "y": cells.get('PinY', '?'),
+        "width": cells.get('Width', '?'),
+        "height": cells.get('Height', '?'),
+        "angle": cells.get('Angle', '0'),
+        "flip_x": cells.get('FlipX', '0'),
+        "flip_y": cells.get('FlipY', '0')
+    }
+    
+    # 如果有几何路径数据，添加到结果中
+    if geometry_sections:
+        geometry["path_data"] = geometry_sections
+    
+    # 如果没有找到基本几何信息，尝试从master获取
+    if geometry["x"] == '?' or geometry["y"] == '?':
+        master_id = shape_elem.get("Master")
+        if master_id:
+            master_geometry = load_master_geometry(zf, master_id)
+            # 合并master几何信息，但保留已有的有效值
+            for key, value in master_geometry.items():
+                if geometry.get(key) == '?' or key not in geometry:
+                    geometry[key] = value
+    
+    return geometry
 
-# ========== 递归解析 Shape ==========
+# 修改parse_shape_recursive函数以提取更多形状信息
 def parse_shape_recursive(shape_elem, shape_texts, zf, debug=False):
     sid = shape_elem.get('ID')
     name = shape_texts.get(sid, f"ID:{sid}")
-    shape_type = shape_elem.get('Type', 'N/A')
-    geometry = get_shape_geometry(shape_elem, zf)
+    shape_type = shape_elem.get('Type', 'Shape')
+    geometry = extract_shape_geometry(shape_elem, zf)
     properties = extract_shape_properties(shape_elem)
     
-    # 提取 Master 信息
+    # 提取连接点信息
+    connection_points = []
+    for cp in shape_elem.findall('.//v:ConnectionPoint', namespaces):
+        cp_info = {
+            "id": cp.get('ID', '?'),
+            "x": cp.get('X', '?'),
+            "y": cp.get('Y', '?'),
+            "dir": cp.get('Dir', '?'),
+            "type": cp.get('Type', '?')
+        }
+        connection_points.append(cp_info)
+    
+    # 提取文本信息
+    text_content = ""
+    text_elem = shape_elem.find('.//v:Text', namespaces)
+    if text_elem is not None:
+        text_content = ''.join(text_elem.itertext()).strip()
+    
+    # 提取Master信息
     master_id = shape_elem.get("Master", "")
     master_name = ""
     if master_id:
-        # 尝试获取 Master 名称
+        # 尝试获取Master名称
         master_file = f"visio/masters/master{master_id}.xml"
         if master_file in zf.namelist():
             try:
@@ -169,7 +218,7 @@ def parse_shape_recursive(shape_elem, shape_texts, zf, debug=False):
                         master_name = master_elem.get('Name', '')
             except Exception as e:
                 if debug:
-                    print(f"[DEBUG] 无法读取 Master 名称: {e}")
+                    print(f"[DEBUG] 无法读取Master名称: {e}")
 
     if debug:
         print(f"[DEBUG] Shape: {name} (ID:{sid}) => XYWH: {geometry}")
@@ -182,10 +231,12 @@ def parse_shape_recursive(shape_elem, shape_texts, zf, debug=False):
         "properties": properties,
         "master_id": master_id,
         "master_name": master_name,
+        "text": text_content,
+        "connection_points": connection_points,
         "children": []
     }
 
-    # 递归子 shape
+    # 递归子shape
     shapes_container = shape_elem.find('v:Shapes', namespaces)
     if shapes_container is not None:
         for sub_shape in shapes_container.findall('v:Shape', namespaces):
@@ -193,7 +244,7 @@ def parse_shape_recursive(shape_elem, shape_texts, zf, debug=False):
 
     return shape_dict
 
-# ========== 读取连接线形状 ==========
+# 修改extract_connectors函数以提取更详细的连接线信息
 def extract_connectors(vsdx_path):
     connectors = {}
     with zipfile.ZipFile(vsdx_path, 'r') as zf:
@@ -232,28 +283,53 @@ def extract_connectors(vsdx_path):
                         begin_arrow = "0"
                         end_arrow = "0"
                         line_pattern = "0"
+                        line_color = "0"
+                        line_weight = "0"
                         geometry_points = []
                         
+                        # 提取更多线条属性
                         for cell in shape.findall('.//v:Cell', namespaces):
-                            if cell.get('N') == 'BeginArrow':
+                            cell_name = cell.get('N')
+                            if cell_name == 'BeginArrow':
                                 begin_arrow = cell.get('V', '0')
-                            elif cell.get('N') == 'EndArrow':
+                            elif cell_name == 'EndArrow':
                                 end_arrow = cell.get('V', '0')
-                            elif cell.get('N') == 'LinePattern':
+                            elif cell_name == 'LinePattern':
                                 line_pattern = cell.get('V', '0')
+                            elif cell_name == 'LineColor':
+                                line_color = cell.get('V', '0')
+                            elif cell_name == 'LineWeight':
+                                line_weight = cell.get('V', '0')
                         
                         # 提取几何点
                         for row in shape.findall('.//v:Row', namespaces):
-                            if row.get('T') == 'LineTo' or row.get('T') == 'MoveTo':
-                                x = None
-                                y = None
+                            row_type = row.get('T')
+                            if row_type in ['LineTo', 'MoveTo', 'ArcTo', 'EllipticalArcTo']:
+                                point_data = {"type": row_type}
+                                
                                 for cell in row.findall('.//v:Cell', namespaces):
-                                    if cell.get('N') == 'X':
-                                        x = cell.get('V', '0')
-                                    elif cell.get('N') == 'Y':
-                                        y = cell.get('V', '0')
-                                if x is not None and y is not None:
-                                    geometry_points.append({"x": x, "y": y})
+                                    cell_name = cell.get('N')
+                                    cell_value = cell.get('V', '0')
+                                    point_data[cell_name] = cell_value
+                                
+                                # 确保至少有X和Y坐标
+                                if 'X' in point_data and 'Y' in point_data:
+                                    geometry_points.append(point_data)
+                        
+                        # 提取连接信息
+                        connects = []
+                        for connect in root.findall(f".//v:Connect[@FromSheet='{connector_id}']|.//v:Connect[@ToSheet='{connector_id}']", namespaces):
+                            from_sheet = connect.get('FromSheet')
+                            to_sheet = connect.get('ToSheet')
+                            from_cell = connect.get('FromCell', '')
+                            to_cell = connect.get('ToCell', '')
+                            
+                            connects.append({
+                                'from_id': from_sheet,
+                                'to_id': to_sheet,
+                                'from_cell': from_cell,
+                                'to_cell': to_cell
+                            })
                         
                         connectors[page_id].append({
                             'id': connector_id,
@@ -262,7 +338,10 @@ def extract_connectors(vsdx_path):
                             'begin_arrow': begin_arrow,
                             'end_arrow': end_arrow,
                             'line_pattern': line_pattern,
-                            'geometry_points': geometry_points
+                            'line_color': line_color,
+                            'line_weight': line_weight,
+                            'geometry_points': geometry_points,
+                            'connects': connects
                         })
     
     return connectors
