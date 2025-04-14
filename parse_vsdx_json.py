@@ -349,52 +349,64 @@ def extract_connectors(vsdx_path):
 # ========== 主函数 ==========
 def analyze_vsdx_structure_with_geometry(vsdx_path, debug=False):
     shape_texts = extract_shape_texts(vsdx_path)
-    connections = extract_connections(vsdx_path)
-    connectors = extract_connectors(vsdx_path)
     pages_data = []
 
     with zipfile.ZipFile(vsdx_path, 'r') as zf:
-        page_files = [f for f in zf.namelist() if f.startswith('visio/pages/page') and f.endswith('.xml')]
-        for idx, page_file in enumerate(page_files, start=1):
-            page_id = page_file.split('page')[-1].split('.')[0]
-            
-            with zf.open(page_file) as f:
-                tree = ET.parse(f)
-                root = tree.getroot()
-                
-                # 提取页面属性
-                page_props = {}
-                page_elem = root.find('.//v:PageSheet', namespaces)
-                if page_elem is not None:
-                    for cell in page_elem.findall('.//v:Cell', namespaces):
-                        name = cell.get('N')
-                        value = cell.get('V', '')
-                        if value:
-                            page_props[name] = value
-                
-                shapes_root = root.find('v:Shapes', namespaces)
+                connects_root = root.find('.//v:Connects', namespaces)  # 修改：使用.//确保能找到嵌套的Connects
+                if connects_root is not None:
+                    for connect in connects_root.findall('v:Connect', namespaces):
+                        page_connects.append({
+                            "from_shape_id": connect.get('FromSheet'),
+                            "to_shape_id": connect.get('ToSheet'),
+                            "from_cell": connect.get('FromCell'),
+                # ------------------------- 新增：解析页面级连接信息 -------------------------
+                page_connects = []
+                connects_root = root.find('.//v:Connects', namespaces)  # 修改：使用.//确保能找到嵌套的Connects
 
                 page_shapes = []
-                if shapes_root is not None:
-                    for shape in shapes_root.findall('v:Shape', namespaces):
-                        # 修改过滤条件，确保连接线也被包含
-                        if is_core_component(shape, shape_texts, debug) or is_connector(shape):
+                        page_connects.append({
+                            "from_shape_id": connect.get('FromSheet'),
+                            "to_shape_id": connect.get('ToSheet'),
                             shape_info = parse_shape_recursive(shape, shape_texts, zf, debug)
                             page_shapes.append(shape_info)
 
-                # 添加连接信息
-                page_connections = connections.get(page_id, [])
-                page_connectors = connectors.get(page_id, [])
+                        if debug and page_connects:
+                            print(f"[DEBUG] 页面 {page_file} 找到 {len(page_connects)} 个连接")
+                shape_id_map = {}
+                
+                def add_shapes_to_map(shapes_list):
+                    for shape in shapes_list:
+                        shape_id_map[shape["id"]] = shape
+                        if shape["children"]:
+                            add_shapes_to_map(shape["children"])
+                
+                # ------------------------- 将连接信息关联到对应形状 -------------------------
+                
+                # 处理页面级连接
+                for conn in page_connects:
+                    from_shape_id = conn["from_shape_id"]
+                    to_shape_id = conn["to_shape_id"]
+                    
+                    if from_shape_id in shape_id_map:
+                        shape_id_map[from_shape_id]["connections"].append({
+                            "from_shape": from_shape_id,
+                            "to_shape": to_shape_id,
+                            "from_cell": conn["from_cell"],
+                            "to_cell": conn["to_cell"]
+                for conn in page_connects:
+                    from_shape_id = conn["from_shape_id"]
+                    to_shape_id = conn["to_shape_id"]
 
-                if page_shapes or page_connectors:
-                    pages_data.append({
+                    if from_shape_id in shape_id_map:
+                        shape_id_map[from_shape_id]["connections"].append({
+                            "from_shape": from_shape_id,
+                            "to_shape": to_shape_id,
+                            "from_cell": conn["from_cell"],
+                            "to_cell": conn["to_cell"]
+                        })
                         "page_index": idx,
-                        "page_id": page_id,
-                        "page_file": page_file,
-                        "page_properties": page_props,
-                        "shapes": page_shapes,
-                        "connections": page_connections,
-                        "connectors": page_connectors
+                            print(f"[DEBUG] 添加连接: {from_shape_id} -> {to_shape_id}")
+                        "shapes": page_shapes
                     })
 
     return pages_data
